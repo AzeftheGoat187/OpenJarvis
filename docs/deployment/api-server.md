@@ -279,6 +279,105 @@ encoding, not encryption; use `wss://` for remote connections and treat the
     WebSocket clients must migrate to `Authorization` or the browser
     subprotocol format above.
 
+## Stripe Billing (test mode)
+
+The API server can create Stripe-hosted Checkout Sessions for one-time
+payments and recurring subscriptions. Card details are collected by Stripe
+and are never handled or stored by OpenJarvis. Checkout is available only
+after a user explicitly calls `POST /v1/billing/checkout-session`; it is not
+exposed as an agent/model tool.
+
+### Configure Stripe test mode
+
+1. Install the server extra, which includes the Stripe Python SDK:
+
+   ```bash
+   uv sync --extra server
+   ```
+
+2. In Stripe Workbench, create **test-mode** products and prices for the
+   one-time and recurring offerings. Do not create live prices for this
+   integration yet. Keep the actual amounts, currency, product names, and
+   renewal terms in Stripe; OpenJarvis accepts only the resulting Price IDs.
+3. Supply `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` through a local
+   secret manager/environment, or store them in the existing
+   `~/.openjarvis/credentials.toml` credential file under `[stripe]`. The
+   values must be test-mode credentials; never commit them or paste them into
+   source code, this documentation, chat, or logs.
+4. Configure these non-secret server environment values:
+
+   | Variable | Purpose |
+   |---|---|
+   | `OPENJARVIS_STRIPE_PAYMENT_PRICE_ID` | Stripe test Price ID for one-time payments |
+   | `OPENJARVIS_STRIPE_SUBSCRIPTION_PRICE_ID` | Stripe test Price ID for recurring subscriptions |
+   | `OPENJARVIS_STRIPE_SUCCESS_URL` | Absolute return URL containing `{CHECKOUT_SESSION_ID}` |
+   | `OPENJARVIS_STRIPE_CANCEL_URL` | Absolute return URL after the customer cancels Checkout |
+
+   Return URLs must be owned by your application. Use HTTPS for deployed
+   sites. The success redirect is for user experience only; do not treat it
+   as proof of payment.
+5. Start the server. Requests to `/v1/billing/*` use the server's normal API
+   key authentication whenever `OPENJARVIS_API_KEY` is configured.
+
+### Create Checkout Sessions
+
+Call the endpoint in response to a deliberate user action, and redirect the
+user to the returned Stripe-hosted URL:
+
+```http
+POST /v1/billing/checkout-session
+Content-Type: application/json
+Authorization: Bearer <your OpenJarvis API key>
+```
+
+For a one-time payment:
+
+```json
+{"mode": "payment"}
+```
+
+For a recurring subscription:
+
+```json
+{"mode": "subscription"}
+```
+
+The server selects the corresponding configured Price ID and quantity `1`;
+client-provided prices, quantities, and redirect URLs are not accepted. The
+response contains `checkout_url`, `session_id`, and `mode`.
+
+### Receive webhook events
+
+Configure a Stripe Workbench webhook destination at
+`https://<your-host>/webhooks/stripe` using **snapshot events** (thin events
+are not supported by this route). Choose the Checkout and subscription events
+your application needs, such as `checkout.session.completed`,
+`checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `customer.subscription.created`,
+`customer.subscription.updated`, `customer.subscription.deleted`,
+`invoice.paid`, and `invoice.payment_failed`, then store the destination's signing secret as
+`STRIPE_WEBHOOK_SECRET`. For a local listener, use the Stripe CLI to forward
+events to `http://localhost:8000/webhooks/stripe`; use the CLI-generated
+signing secret locally and keep it private.
+
+Webhook signatures are verified against the raw request body. Only test-mode
+events (`livemode: false`) are accepted, and duplicate Stripe event IDs are
+durably deduplicated in `~/.openjarvis/stripe_events.sqlite3` (under
+`OPENJARVIS_HOME` if configured). The ledger stores event IDs, event types,
+Stripe object IDs, and receive timestamps—not full payloads or payment
+details. Stripe retries are acknowledged after a valid event has been
+recorded. Deployed environments must keep this database on persistent storage
+or event deduplication will be lost on restart.
+
+This integration does not yet map Stripe customers to OpenJarvis users, grant
+product entitlements, fulfill orders, or provide a customer portal. Those
+behaviors require explicit account and access rules that this app does not
+currently define. A successful browser redirect is not authoritative;
+applications must base any future fulfillment on verified webhook events.
+Live Stripe keys and live-mode webhook events are deliberately rejected.
+Enable live billing only after the product, account mapping, fulfillment, and
+operational review are complete.
+
 ## Streaming via SSE
 
 When `"stream": true` is set in the request, the server returns a `text/event-stream` response using Server-Sent Events (SSE). The response follows the same format as the OpenAI streaming API.
